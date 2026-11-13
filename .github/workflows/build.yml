@@ -1,0 +1,71 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  dylib:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          ls /Applications | grep -i xcode || true
+
+      - name: Install ldid and Theos
+        run: |
+          set -x
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid || true
+          fi
+          if ! command -v ldid >/dev/null 2>&1; then
+            printf '#!/bin/bash\nfor a in "$@"; do last="$a"; done\nexec codesign --force -s - "$last"\n' | sudo tee /usr/local/bin/ldid >/dev/null
+            sudo chmod +x /usr/local/bin/ldid
+          fi
+          ldid -h 2>&1 | head -2 || true
+          export THEOS=$HOME/theos
+          git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "PATH=$THEOS/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Build dylib
+        run: |
+          set -o pipefail
+          make clean >/dev/null 2>&1 || true
+          make -j4 TARGET=iphone:clang:latest:14.0 2>&1 | tee build.log
+          echo "----- artifacts -----"
+          find . -name "*.dylib" -not -path "./.git/*" -print
+
+      - name: Build root daemon (optional)
+        continue-on-error: true
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p out
+          clang -arch arm64 -arch arm64e -isysroot "$SDK" -miphoneos-version-min=14.0 \
+            -fobjc-arc -O2 -framework Foundation -o out/wbfagentd daemon/wbfagentd.m || true
+          cp daemon/com.wbf.agentd.plist out/ 2>/dev/null || true
+          ls -la out || true
+
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p out
+          find . -name "*.dylib" -not -path "./.git/*" -exec cp {} out/ \;
+          find . -name "*.deb" -not -path "./.git/*" -exec cp {} out/ \;
+          ls -la out
+          file out/* 2>/dev/null || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WFBAgent-build
+          path: |
+            out/**
+            build.log
+          if-no-files-found: warn
